@@ -1,211 +1,261 @@
-#importing necessary libraries
+#importing libraries
+import os
 import matplotlib.pyplot as plt
 import torch
 from torch import nn
 from torch import optim
 import torch.nn.functional as F
 import torch.utils.data
+import torchvision
 from torchvision import datasets, models, transforms
 import numpy as np
 import pandas as pd
 from collections import OrderedDict
+import PIL
 from PIL import Image
 import argparse
+import time
 import json
+from torch.autograd import Variable
 
-# define Mandatory and Optional Arguments for the script
-parser = argparse.ArgumentParser (description = 'training script parser')
 
-parser.add_argument ('data_dir', help = 'Provide data directory. Mandatory argument', type = str)
-parser.add_argument ('--save_dir', help = 'Provide saving directory. Optional argument', type = str)
+
+# Initiate variables with default values
+arch = 'vgg16'
+hidden_units = 5120
+learning_rate = 0.001
+epochs = 1
+device = 'cpu'
+
+# Parser
+parser = argparse.ArgumentParser()
+
+parser.add_argument ('data_dir', help = 'Mandatory argument -- Data Directory', type = str)
+parser.add_argument ('--save_dir', help = 'Optional argument -- Save Directory', type = str)
 parser.add_argument ('--arch', help = 'Vgg16 can be used', type = str)
 parser.add_argument ('--lrn', help = 'Learning rate, default value 0.001', type = float)
 parser.add_argument ('--hidden_units', help = 'Hidden units in Classifier. Default value is 1024', type = int)
 parser.add_argument ('--epochs', help = 'Number of epochs', type = int)
-parser.add_argument ('--GPU', help = "Option to use GPU", type = str)
+parser.add_argument ('--gpu',action='store_true', help = "Option to use GPU")
 
-#setting values data loading
+#data loading
 args = parser.parse_args ()
+
+# Select parameters entered in command line
+if args.arch:
+    arch = args.arch
+if args.hidden_units:
+    hidden_units = args.hidden_units
+if args.epochs:
+    epochs = args.epochs
+if args.gpu:        
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 data_dir = args.data_dir
 train_dir = data_dir + '/train'
 valid_dir = data_dir + '/valid'
 test_dir = data_dir + '/test'
 
-#device definition cuda or cpu
-if args.GPU == 'GPU':
-    device = 'cuda'
-else:
-    device = 'cpu'
+# Get the num of classes from the directory
+number_train_classes = len(os.listdir(train_dir))
+number_valid_classes = len(os.listdir(valid_dir))
+number_test_classes = len(os.listdir(test_dir))
 
-#data loading, transformation definition
-if data_dir:
-    train_trans = transforms.Compose ([transforms.RandomRotation (30),
-                                       transforms.RandomResizedCrop (224),
-                                       transforms.RandomHorizontalFlip (),
-                                       transforms.ToTensor (),
-                                       transforms.Normalize ([0.485, 0.456, 0.406],[0.229, 0.224, 0.225])
-                                       ])
-
-    valid_trans = transforms.Compose ([transforms.Resize (255),
-                                       transforms.CenterCrop (224),
-                                       transforms.ToTensor (),
-                                       transforms.Normalize ([0.485, 0.456, 0.406],[0.229, 0.224, 0.225])
-                                       ])
-
-    test_trans = transforms.Compose ([transforms.Resize (255),
-                                      transforms.CenterCrop (224),
-                                      transforms.ToTensor (),
-                                      transforms.Normalize ([0.485, 0.456, 0.406],[0.229, 0.224, 0.225])
-                                      ])
+if (number_train_classes != number_valid_classes) or (number_train_classes != number_test_classes) or (number_valid_classes != number_test_classes):
+    print('Error: number of train, valid test classes is not the same')
     
-    train_image_datasets = datasets.ImageFolder (train_dir, transform = train_trans)
-    valid_image_datasets = datasets.ImageFolder (valid_dir, transform = valid_trans)
-    test_image_datasets = datasets.ImageFolder (test_dir, transform = test_trans)
+number_classes = number_train_classes
 
-    
-    train_loader = torch.utils.data.DataLoader(train_image_datasets, batch_size = 64, shuffle = True)
-    valid_loader = torch.utils.data.DataLoader(valid_image_datasets, batch_size = 64, shuffle = True)
-    test_loader = torch.utils.data.DataLoader(test_image_datasets, batch_size = 64, shuffle = True)
-    
+train_trans = transforms.Compose([transforms.RandomRotation(30),
+                                       transforms.RandomResizedCrop(224),
+                                       transforms.RandomHorizontalFlip(),
+                                       transforms.ToTensor(),
+                                       transforms.Normalize([0.485, 0.456, 0.406], 
+                                                            [0.229, 0.224, 0.225])])
+valid_trans = transforms.Compose([transforms.Resize(256),
+                                      transforms.CenterCrop(224),
+                                      transforms.ToTensor(),
+                                      transforms.Normalize([0.485, 0.456, 0.406], 
+                                                           [0.229, 0.224, 0.225])])
+test_trans = transforms.Compose([transforms.Resize(256),
+                                      transforms.CenterCrop(224),
+                                      transforms.ToTensor(),
+                                      transforms.Normalize([0.485, 0.456, 0.406], 
+                                                           [0.229, 0.224, 0.225])])
+
+# TODO: Load the datasets with ImageFolder
+train_dataSet = datasets.ImageFolder(train_dir, transform=train_trans)
+valid_dataSet = datasets.ImageFolder(valid_dir, transform=valid_trans)
+test_dataSet = datasets.ImageFolder(test_dir, transform=test_trans)
+
+# TODO: Using the image datasets and the trainforms, define the dataloaders
+train_loader = torch.utils.data.DataLoader(train_dataSet, batch_size=64, shuffle=True)
+valid_loader = torch.utils.data.DataLoader(valid_dataSet, batch_size=64, shuffle=True)
+test_loader = torch.utils.data.DataLoader(test_dataSet, batch_size=64, shuffle=True)
+
 
 #label mapping
+#import json
 with open('cat_to_name.json', 'r') as f:
     cat_to_name = json.load(f)
+    #print(cat_to_name)
 
-def load_model (arch, hidden_units):
-    if arch == 'vgg16': 
-        model = models.vgg16 (pretrained = True)
-        for param in model.parameters():
-            param.requires_grad = False
-        if hidden_units:
-            classifier = nn.Sequential  (OrderedDict ([
-                            ('fc1', nn.Linear (25088, 4096)),
-                            ('relu1', nn.ReLU ()),
-                            ('dropout1', nn.Dropout (p = 0.5)),
-                            ('fc2', nn.Linear (4096, hidden_units)),
-                            ('relu2', nn.ReLU ()),
-                            ('dropout2', nn.Dropout (p = 0.5)),
-                            ('fc3', nn.Linear (hidden_units, 102)),
-                            ('output', nn.LogSoftmax (dim =1))
-                            ]))
-        else: 
-            classifier = nn.Sequential  (OrderedDict ([
-                        ('fc1', nn.Linear (25088, 4096)),
-                        ('relu1', nn.ReLU ()),
-                        ('dropout1', nn.Dropout (p = 0.5)),
-                        ('fc2', nn.Linear (4096, 2048)),
-                        ('relu2', nn.ReLU ()),
-                        ('dropout2', nn.Dropout (p = 0.5)),
-                        ('fc3', nn.Linear (2048, 102)),
-                        ('output', nn.LogSoftmax (dim =1))
-                        ]))
-    else: 
-        arch = 'vgg13'        
-        model = models.alexnet (pretrained = True)
-        for param in model.parameters():
-            param.requires_grad = False
-        if hidden_units:            
-            classifier = nn.Sequential  (OrderedDict ([
-                            ('fc1', nn.Linear (9216, 4096)),
-                            ('relu1', nn.ReLU ()),
-                            ('dropout1', nn.Dropout (p = 0.5)),
-                            ('fc2', nn.Linear (4096, hidden_units)),
-                            ('relu2', nn.ReLU ()),
-                            ('dropout2', nn.Dropout (p = 0.5)),
-                            ('fc3', nn.Linear (hidden_units, 102)),
-                            ('output', nn.LogSoftmax (dim =1))
-                            ]))
-        else: 
-            classifier = nn.Sequential  (OrderedDict ([
-                        ('fc1', nn.Linear (9216, 4096)),
-                        ('relu1', nn.ReLU ()),
-                        ('dropout1', nn.Dropout (p = 0.5)),
-                        ('fc2', nn.Linear (4096, 2048)),
-                        ('relu2', nn.ReLU ()),
-                        ('dropout2', nn.Dropout (p = 0.5)),
-                        ('fc3', nn.Linear (2048, 102)),
-                        ('output', nn.LogSoftmax (dim =1))
-                        ]))
-    model.classifier = classifier 
-    return model, arch
 
-# validation function definition
-def validation(model, valid_loader, criterion):
-    model.to (device)
+# Build and train your network
+model = models.vgg16(pretrained=True)
 
-    valid_loss = 0
-    accuracy = 0
+# Freeze parameters so we don't backprop through them
+for param in model.parameters():
+    param.requires_grad = False
+
+# Updating classifier
+
+dropout_probability = 0.5
+in_features = 25088
+out_features = 1024
+
+classifier = nn.Sequential(OrderedDict([
+                          ('fc1', nn.Linear(25088, 1024, bias=True)),
+                          ('relu1', nn.ReLU()),
+                          ('dropout1', nn.Dropout(p=0.5)),
+                          ('fc2', nn.Linear(1024, 102, bias=True)),
+                          ('output', nn.LogSoftmax(dim=1))
+                          ]))
     
-    for inputs, labels in valid_loader:
-        inputs, labels = inputs.to(device), labels.to(device)
-        output = model.forward(inputs)
-        valid_loss += criterion(output, labels).item()
+model.classifier = classifier
 
-        ps = torch.exp(output)
-        equality = (labels.data == ps.max(dim=1)[1])
-        accuracy += equality.type(torch.FloatTensor).mean()
 
-    return valid_loss, accuracy
+# Train the network - Define deep learning method
+# gpu section -- use gpu if available
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# model loading
-model, arch = load_model (args.arch, args.hidden_units)
+# train the classifier parameters
+criterion = nn.NLLLoss()
+optimizer = optim.Adam(model.classifier.parameters(), lr=0.001)
+
+# change to device
+model.to(device);
+
+epochs = 5
+validation_step = True
+
+
+# Train the classifier layers using backpropogation using the pre-trained network to get features
+print('\n*** Training process started! ***')
+start_training_time = time.time()
+
+for epoch in range(epochs):
+    train_loss = 0
+    for inputs, labels in train_loader:     
+        
+        # Move input and label tensors to the default device
+        inputs = inputs.to(device)
+        labels = labels.to(device)        
+        optimizer.zero_grad()        
+        log_probabilities = model.forward(inputs)
+        loss = criterion(log_probabilities, labels)
+        loss.backward()
+        optimizer.step()
+        train_loss += loss.item()
+    
+    print('\nEpoch: {}/{} '.format(epoch + 1, epochs),
+          '\nTraining:\t\t\tLoss: {:.4f}  '.format(train_loss / len(train_loader))
+         )
+           
+    if validation_step == True:
+        
+        valid_loss = 0
+        valid_accuracy = 0
+        model.eval()
+
+        with torch.no_grad():
+            for inputs, labels in valid_loader:
+                inputs, labels = inputs.to(device), labels.to(device)                
+                log_probabilities = model.forward(inputs)
+                loss = criterion(log_probabilities, labels)        
+                valid_loss = valid_loss + loss.item()
+        
+                # Calculate accuracy
+                probabilities = torch.exp(log_probabilities)
+                top_probability, top_class = probabilities.topk(1, dim = 1)                
+                equals = top_class == labels.view(*top_class.shape)                
+                valid_accuracy = valid_accuracy + torch.mean(equals.type(torch.FloatTensor)).item()
+        
+        model.train()
+       
+        print("Validation:\t\tLoss: {:.4f}  ".format(valid_loss / len(valid_loader)),
+              "\tAccuracy: {:.4f}".format(valid_accuracy / len(valid_loader)))
+        
+        
+end_training_time = time.time()
+
+print('\n*** Training process completed! ***\n')
+      
+training_time = end_training_time - start_training_time
+print('Training time: {:.0f}m {:.0f}s'.format(training_time / 60, training_time % 60))
+
+test_loss = 0
+test_accuracy = 0
+model.eval()
+
+
+print('*** Validation started! ***')
+start_time = time.time()
+
+for inputs, labels in test_loader:
+    inputs, labels = inputs.to(device), labels.to(device)
+
+    log_probabilities = model.forward(inputs)
+    loss = criterion(log_probabilities, labels)
+
+    test_loss = test_loss + loss.item()
+
+    # Calculate accuracy
+    probabilities = torch.exp(log_probabilities)
+    top_probability, top_class = probabilities.topk(1, dim = 1)
+
+    equals = top_class == labels.view(*top_class.shape)
+
+    test_accuracy = test_accuracy + torch.mean(equals.type(torch.FloatTensor)).item()
+
+end_time = time.time()
+print('*** Validation ended! ***')
+validation_time = end_time - start_time
+print('Validation time: {:.0f}m {:.0f}s'.format(validation_time / 60, validation_time % 60))
+
+print("\nTest:\t\t\t\tLoss: {:.4f}  ".format(test_loss / len(test_loader)),
+      "\tAccuracy: {:.4f}".format(test_accuracy / len(test_loader)))
+
 
 # training and initialization
 criterion = nn.NLLLoss ()
-if args.lrn: 
-    
+if args.lrn:     
     optimizer = optim.Adam (model.classifier.parameters (), lr = args.lrn)
 else:
     optimizer = optim.Adam (model.classifier.parameters (), lr = 0.001)
 
 
-model.to (device) 
-
-if args.epochs:
-    epochs = args.epochs
-else:
-    epochs = 1
-
-print_every = 30
-steps = 0
-
-for e in range (epochs):
-    running_loss = 0
-    for ii, (inputs, labels) in enumerate (train_loader):
-        steps += 1
-        inputs, labels = inputs.to(device), labels.to(device)
-        optimizer.zero_grad ()        
-        outputs = model.forward (inputs) 
-        loss = criterion (outputs, labels) 
-        loss.backward ()
-        optimizer.step () 
-        running_loss += loss.item ()
-
-        if steps % print_every == 0:
-            model.eval () 
-            with torch.no_grad():
-                valid_loss, accuracy = validation(model, valid_loader, criterion)
-
-            print("Epoch: {}/{}.. ".format(e+1, epochs),
-                  "Training Loss: {:.3f}.. ".format(running_loss/print_every),
-                  "Valid Loss: {:.3f}.. ".format(valid_loss/len(valid_loader)),
-                  "Valid Accuracy: {:.3f}%".format(accuracy/len(valid_loader)*100))
-
-            running_loss = 0
-            model.train()
-
 model.to ('cpu') 
-model.class_to_idx = train_image_datasets.class_to_idx 
+model.class_to_idx = train_dataSet.class_to_idx 
 
-#creating dictionary
+#Save the checkpoint 
+model.class_to_idx = train_dataSet.class_to_idx
+
+checkpoint = {'network': 'vgg16',
+              'input_size': in_features,
+              'output_size': number_classes,                
+              'classifier' : model.classifier,
+              'epochs': epochs,
+              'optimizer': optimizer.state_dict(),
+              'state_dict': model.state_dict(),
+              'class_to_idx': model.class_to_idx,
+              'mapping': model.class_to_idx}
+
+torch.save(checkpoint, 'checkpoint.pth')
+
+#creating checkpoint
 checkpoint = {'classifier': model.classifier,
               'state_dict': model.state_dict (),
               'arch': arch,
               'mapping':    model.class_to_idx
              }
-#saving trained model
-if args.save_dir:
-    torch.save (checkpoint, args.save_dir + '/checkpoint.pth')
-else:
-    torch.save (checkpoint, 'checkpoint.pth')
